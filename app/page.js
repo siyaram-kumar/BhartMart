@@ -1,7 +1,7 @@
 'use client'
 import { useEffect, useMemo, useState } from 'react'
 import { motion } from 'framer-motion'
-import { Search, ShoppingCart, Bell, User, Store, MapPin, Star, Shield, Truck, CheckCircle2, Sparkles, ChevronRight, Menu, X, Plus, Minus, Share2, MessageCircle, Phone, Home, Grid3x3, ClipboardList, ArrowLeft, Filter, BadgeCheck, Award, TrendingUp, IndianRupee, Download, FileText, CircleCheck, Package } from 'lucide-react'
+import { Search, ShoppingCart, Bell, User, Store, MapPin, Star, Shield, Truck, CheckCircle2, Sparkles, ChevronRight, Menu, X, Plus, Minus, Share2, MessageCircle, Phone, Home, Grid3x3, ClipboardList, ArrowLeft, Filter, BadgeCheck, Award, TrendingUp, IndianRupee, Download, FileText, CircleCheck, Package, LayoutDashboard } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,6 +9,9 @@ import { Badge } from '@/components/ui/badge'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { useAuth } from '@/contexts/AuthContext'
+import { FirebaseLoginModal } from '@/components/FirebaseLoginModal'
+import { BuyerDashboard } from '@/components/BuyerDashboard'
 
 const HERO_IMG = 'https://images.unsplash.com/photo-1627915589334-14a3c3e3a741'
 const money = (n) => '₹' + Number(n).toLocaleString('en-IN')
@@ -898,7 +901,7 @@ function BottomNav({ view, setView, cartCount, user, onOpenLogin, onOpenCart }) 
     { k: 'categories', l: 'Categories', i: Grid3x3, on: () => setView({ name: 'category', category: 'grocery' }) },
     { k: 'orders', l: 'Orders', i: ClipboardList, on: () => user ? setView({ name: 'orders' }) : onOpenLogin() },
     { k: 'cart', l: 'Cart', i: ShoppingCart, on: () => user ? onOpenCart() : onOpenLogin(), badge: cartCount },
-    { k: 'account', l: 'Account', i: User, on: () => user ? toast.info('Profile coming soon') : onOpenLogin() },
+    { k: 'account', l: 'Account', i: User, on: () => user ? setView({ name: 'dashboard' }) : onOpenLogin() },
   ]
   return (
     <nav className="lg:hidden fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-30">
@@ -953,7 +956,18 @@ function OrdersPage({ user, setView }) {
 }
 
 function App() {
-  const { user, login } = useLocalUser()
+  // Firebase auth
+  const { user: fbUser, profile, loading: authLoading } = useAuth()
+  // Adapter to keep existing components unchanged - map Firebase user to legacy shape
+  const user = fbUser ? {
+    id: fbUser.uid,
+    uid: fbUser.uid,
+    name: profile?.displayName || fbUser.displayName || fbUser.email?.split('@')[0] || (fbUser.phoneNumber ? 'Buyer ' + fbUser.phoneNumber.slice(-4) : 'Buyer'),
+    email: fbUser.email,
+    mobile: fbUser.phoneNumber?.replace('+91', '') || '',
+    role: profile?.role || 'buyer',
+  } : null
+
   const [view, setView] = useState({ name: 'home' })
   const [cats, setCats] = useState([])
   const [products, setProducts] = useState([])
@@ -977,13 +991,28 @@ function App() {
     if (!user) return setNotifCount(0)
     fetch('/api/notifications/' + user.id).then(r => r.json()).then(d => setNotifCount((d.notifications || []).filter(n => !n.read).length))
   }
-  useEffect(() => { refreshCart(); refreshNotif() }, [user])
+  useEffect(() => { refreshCart(); refreshNotif() }, [user?.id])
   useEffect(() => {
     if (view.name === 'product' && view.id) {
       setProductDetail(null)
       fetch('/api/products/' + view.id).then(r => r.json()).then(d => setProductDetail(d))
     }
   }, [view])
+
+  // On login success, execute pending action (add-to-cart or buy-now)
+  useEffect(() => {
+    if (user && pendingAction) {
+      const { type, product, qty } = pendingAction
+      const q = qty || product.moq
+      fetch('/api/cart/add', { method: 'POST', body: JSON.stringify({ userId: user.id, productId: product.id, qty: q }) })
+        .then(r => r.json())
+        .then(d => {
+          if (d.ok) { setCart(d.cart); toast.success('Added to cart') }
+          setPendingAction(null)
+          if (type === 'buy') setTimeout(() => setView({ name: 'checkout' }), 200)
+        })
+    }
+  }, [user?.id, pendingAction])
 
   const openProduct = (p) => setView({ name: 'product', id: p.id })
 
@@ -1003,18 +1032,6 @@ function App() {
     if (!user) { setPendingAction({ type: 'buy', product, qty }); setLoginOpen(true); return }
     await addToCart(product, qty)
     setTimeout(() => setView({ name: 'checkout' }), 300)
-  }
-  const handleLogin = async (u) => {
-    login(u)
-    if (pendingAction) {
-      const { type, product, qty } = pendingAction
-      const q = qty || product.moq
-      const r = await fetch('/api/cart/add', { method: 'POST', body: JSON.stringify({ userId: u.id, productId: product.id, qty: q }) })
-      const d = await r.json()
-      if (d.ok) { setCart(d.cart); toast.success('Added to cart') }
-      setPendingAction(null)
-      if (type === 'buy') setTimeout(() => setView({ name: 'checkout' }), 200)
-    }
   }
 
   const filteredProducts = useMemo(() => {
@@ -1043,9 +1060,10 @@ function App() {
         {view.name === 'checkout' && <CheckoutPage user={user} cart={cart} refresh={refreshCart} setView={setView} />}
         {view.name === 'orderSuccess' && <OrderTracking orderId={view.orderId} setView={setView} />}
         {view.name === 'orders' && user && <OrdersPage user={user} setView={setView} />}
+        {view.name === 'dashboard' && <BuyerDashboard setView={setView} />}
       </main>
       <BottomNav view={view} setView={setView} cartCount={cart.items?.reduce((s, i) => s + i.qty, 0) || 0} user={user} onOpenLogin={() => setLoginOpen(true)} onOpenCart={() => setCartOpen(true)} />
-      <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} onLogin={handleLogin} />
+      <FirebaseLoginModal open={loginOpen} onClose={() => setLoginOpen(false)} />
       <CartDrawer open={cartOpen} onClose={() => setCartOpen(false)} cart={cart} refresh={refreshCart} user={user} setView={setView} />
       <NotifDrawer open={notifOpen} onClose={() => setNotifOpen(false)} user={user} />
     </div>
