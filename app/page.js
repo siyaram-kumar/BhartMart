@@ -12,6 +12,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { useAuth } from '@/contexts/AuthContext'
 import { FirebaseLoginModal } from '@/components/FirebaseLoginModal'
 import { BuyerDashboard } from '@/components/BuyerDashboard'
+import { useProducts, useCategories, useProduct, useCart as useFbCart, setCartItem, removeCartItem, createOrder, useOrder, useUserOrders, useNotifications } from '@/lib/firestore'
 
 const HERO_IMG = 'https://images.unsplash.com/photo-1627915589334-14a3c3e3a741'
 const money = (n) => '₹' + Number(n).toLocaleString('en-IN')
@@ -519,12 +520,10 @@ function CartDrawer({ open, onClose, cart, refresh, user, setView }) {
   const total = subtotal + gst + shipping
   const changeQty = async (item, newQty) => {
     if (newQty < item.product.moq) return
-    await fetch('/api/cart/add', { method: 'POST', body: JSON.stringify({ userId: user.id, productId: item.productId, qty: newQty }) })
-    refresh()
+    await setCartItem(user.uid, item.productId, newQty, item.product)
   }
   const remove = async (pid) => {
-    await fetch('/api/cart/remove', { method: 'POST', body: JSON.stringify({ userId: user.id, productId: pid }) })
-    refresh()
+    await removeCartItem(user.uid, pid)
   }
   return (
     <Sheet open={open} onOpenChange={v => !v && onClose()}>
@@ -647,11 +646,13 @@ function CheckoutPage({ user, cart, refresh, setView }) {
   const total = subtotal + gst + shipping
   const placeOrder = async () => {
     setPlacing(true)
-    const r = await fetch('/api/orders', { method: 'POST', body: JSON.stringify({ userId: user.id, items: calc, address: addr, payment, subtotal, gst, shipping, total }) })
-    const d = await r.json()
-    setPlacing(false)
-    if (d.ok) { toast.success('Order placed successfully!'); refresh(); setView({ name: 'orderSuccess', orderId: d.order.id }) }
-    else toast.error('Failed to place order')
+    try {
+      const order = await createOrder({ userId: user.uid, items: calc, address: addr, payment, subtotal, gst, shipping, total })
+      toast.success('Order placed successfully!')
+      setView({ name: 'orderSuccess', orderId: order.id })
+    } catch (e) {
+      console.error(e); toast.error('Failed to place order')
+    } finally { setPlacing(false) }
   }
   if (items.length === 0) return (
     <div className="max-w-md mx-auto py-20 text-center">
@@ -764,18 +765,7 @@ function CheckoutPage({ user, cart, refresh, setView }) {
 }
 
 function OrderTracking({ orderId, setView }) {
-  const [order, setOrder] = useState(null)
-  useEffect(() => {
-    let alive = true
-    const fetchOrder = async () => {
-      const r = await fetch('/api/orders/' + orderId)
-      const d = await r.json()
-      if (alive && d.order) setOrder(d.order)
-    }
-    fetchOrder()
-    const t = setInterval(fetchOrder, 15000)
-    return () => { alive = false; clearInterval(t) }
-  }, [orderId])
+  const order = useOrder(orderId)
   if (!order) return <div className="py-20 text-center text-slate-500">Loading order...</div>
   const currentIdx = order.timeline.findIndex(t => !t.done)
   const activeIdx = currentIdx === -1 ? order.timeline.length - 1 : currentIdx
@@ -867,11 +857,7 @@ function OrderTracking({ orderId, setView }) {
 }
 
 function NotifDrawer({ open, onClose, user }) {
-  const [notifs, setNotifs] = useState([])
-  useEffect(() => {
-    if (!open || !user) return
-    fetch('/api/notifications/' + user.id).then(r => r.json()).then(d => setNotifs(d.notifications || []))
-  }, [open, user])
+  const notifs = useNotifications(user?.uid || null)
   return (
     <Sheet open={open} onOpenChange={v => !v && onClose()}>
       <SheetContent side="right" className="w-full sm:max-w-md p-0 flex flex-col">
@@ -924,8 +910,7 @@ function BottomNav({ view, setView, cartCount, user, onOpenLogin, onOpenCart }) 
 }
 
 function OrdersPage({ user, setView }) {
-  const [orders, setOrders] = useState([])
-  useEffect(() => { fetch('/api/orders/user?userId=' + user.id).then(r => r.json()).then(d => setOrders(d.orders || [])) }, [user])
+  const orders = useUserOrders(user?.uid || null)
   return (
     <div className="max-w-5xl mx-auto px-4 lg:px-6 py-6">
       <button onClick={() => setView({ name: 'home' })} className="flex items-center gap-1 text-sm text-slate-500 hover:text-teal-700 mb-3"><ArrowLeft className="w-4 h-4" /> Home</button>
@@ -969,50 +954,38 @@ function App() {
   } : null
 
   const [view, setView] = useState({ name: 'home' })
-  const [cats, setCats] = useState([])
-  const [products, setProducts] = useState([])
-  const [cart, setCart] = useState({ items: [] })
-  const [notifCount, setNotifCount] = useState(0)
+  // === FIRESTORE DATA ===
+  const { categories: cats } = useCategories()
+  const { products } = useProducts()
+  const fbCart = useFbCart(user?.uid || null)
+  const cart = { items: fbCart.items || [] }
+  const notifications = useNotifications(user?.uid || null)
+  const notifCount = notifications.filter(n => !n.read).length
+
   const [loginOpen, setLoginOpen] = useState(false)
   const [cartOpen, setCartOpen] = useState(false)
   const [notifOpen, setNotifOpen] = useState(false)
   const [pendingAction, setPendingAction] = useState(null)
-  const [productDetail, setProductDetail] = useState(null)
 
-  useEffect(() => {
-    fetch('/api/categories').then(r => r.json()).then(d => setCats(d.categories || []))
-    fetch('/api/products').then(r => r.json()).then(d => setProducts(d.products || []))
-  }, [])
-  const refreshCart = () => {
-    if (!user) return setCart({ items: [] })
-    fetch('/api/cart/' + user.id).then(r => r.json()).then(d => setCart(d.cart || { items: [] }))
-  }
-  const refreshNotif = () => {
-    if (!user) return setNotifCount(0)
-    fetch('/api/notifications/' + user.id).then(r => r.json()).then(d => setNotifCount((d.notifications || []).filter(n => !n.read).length))
-  }
-  useEffect(() => { refreshCart(); refreshNotif() }, [user?.id])
-  useEffect(() => {
-    if (view.name === 'product' && view.id) {
-      setProductDetail(null)
-      fetch('/api/products/' + view.id).then(r => r.json()).then(d => setProductDetail(d))
-    }
-  }, [view])
+  const { product: productDetailProduct, related: productDetailRelated } = useProduct(view.name === 'product' ? view.id : null)
+  const productDetail = productDetailProduct ? { product: productDetailProduct, related: productDetailRelated } : null
+
+  const refreshCart = () => {} // No-op - Firestore is real-time via onSnapshot
 
   // On login success, execute pending action (add-to-cart or buy-now)
   useEffect(() => {
     if (user && pendingAction) {
       const { type, product, qty } = pendingAction
       const q = qty || product.moq
-      fetch('/api/cart/add', { method: 'POST', body: JSON.stringify({ userId: user.id, productId: product.id, qty: q }) })
-        .then(r => r.json())
-        .then(d => {
-          if (d.ok) { setCart(d.cart); toast.success('Added to cart') }
+      setCartItem(user.uid, product.id, q, product)
+        .then(() => {
+          toast.success('Added to cart')
           setPendingAction(null)
           if (type === 'buy') setTimeout(() => setView({ name: 'checkout' }), 200)
         })
+        .catch(e => { console.error(e); toast.error('Cart error'); setPendingAction(null) })
     }
-  }, [user?.id, pendingAction])
+  }, [user?.uid, pendingAction])
 
   const openProduct = (p) => setView({ name: 'product', id: p.id })
 
@@ -1024,9 +997,10 @@ function App() {
       return
     }
     const q = qty || product.moq
-    const r = await fetch('/api/cart/add', { method: 'POST', body: JSON.stringify({ userId: user.id, productId: product.id, qty: q }) })
-    const d = await r.json()
-    if (d.ok) { setCart(d.cart); toast.success('Added to cart') }
+    try {
+      await setCartItem(user.uid, product.id, q, product)
+      toast.success('Added to cart')
+    } catch (e) { console.error(e); toast.error('Failed to add') }
   }
   const buyNow = async (product, qty) => {
     if (!user) { setPendingAction({ type: 'buy', product, qty }); setLoginOpen(true); return }
