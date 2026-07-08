@@ -8,3 +8,4 @@ memory/
 node_modules/@next/swc-linux-arm64-gnu/next-swc.linux-arm64-gnu.node
 node_modules/@next/swc-linux-arm64-musl/next-swc.linux-arm64-musl.node
 wholesale-hub-demo-1.zip
+.next/cache/webpack/server-production/0.pack
